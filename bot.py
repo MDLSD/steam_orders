@@ -49,7 +49,10 @@ STEAM_LOGIN_SECURE = _require("STEAM_LOGIN_SECURE")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "180"))
 # ===============================================================
 
-MY_BUY_ORDERS_URL = "https://steamcommunity.com/market/mybuyorders/"
+# HTML-страницы маркета Steam отдаёт скриптам как «разлогиненные».
+# Рабочий способ — AJAX-эндпоинт mylistings: он возвращает JSON, в котором
+# в поле results_html лежат и продажи, и ордера на покупку (mybuyorder_*).
+MY_LISTINGS_URL = "https://steamcommunity.com/market/mylistings/?count=100"
 # Long-poll для команд: на столько секунд «висит» запрос getUpdates.
 COMMAND_POLL_TIMEOUT = 20
 
@@ -93,25 +96,28 @@ def fetch_buy_orders() -> dict:
     Бросает SessionExpired, если Steam нас не узнал (cookie протухла).
     """
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Cookie": f"steamLoginSecure={STEAM_LOGIN_SECURE}",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://steamcommunity.com/market/",
     }
-    r = requests.get(MY_BUY_ORDERS_URL, headers=headers, timeout=30)
+    r = requests.get(
+        MY_LISTINGS_URL,
+        headers=headers,
+        cookies={"steamLoginSecure": STEAM_LOGIN_SECURE},
+        timeout=30,
+    )
     r.raise_for_status()
 
-    page = r.text
+    # Залогиненному отдаётся JSON с success=true. Иначе — cookie протухла.
     try:
         data = r.json()
-        if isinstance(data, dict) and "results_html" in data:
-            page = data["results_html"]
     except ValueError:
-        pass
-
-    # Признак авторизации: Steam пишет g_steamID = "765..." когда мы залогинены,
-    # и g_steamID = false когда сессия недействительна.
-    m = re.search(r'g_steamID\s*=\s*(false|"\d+")', page)
-    if m and m.group(1) == "false":
         raise SessionExpired()
+    if not isinstance(data, dict) or not data.get("success"):
+        raise SessionExpired()
+
+    page = data.get("results_html", "")
 
     orders = {}
     blocks = re.split(r'id="mybuyorder_(\d+)"', page)
@@ -119,14 +125,19 @@ def fetch_buy_orders() -> dict:
         order_id = blocks[i]
         chunk = blocks[i + 1]
 
-        qty_match = re.search(r'market_listing_buyorder_qty[^>]*>\s*(\d+)', chunk)
+        # Количество и цена лежат внутри market_listing_price:
+        #   <span class="market_listing_inline_buyorder_qty">2 @</span> 148₴
+        qty_match = re.search(r'market_listing_inline_buyorder_qty">\s*(\d+)\s*@', chunk)
         qty = int(qty_match.group(1)) if qty_match else 1
+
+        price_match = re.search(
+            r'market_listing_inline_buyorder_qty">[^<]*</span>\s*([^<]+?)\s*</span>',
+            chunk, re.S,
+        )
+        price = html.unescape(price_match.group(1).strip()) if price_match else "?"
 
         name_match = re.search(r'market_listing_item_name[^>]*>(.*?)</span>', chunk, re.S)
         name = html.unescape(re.sub(r"<[^>]+>", "", name_match.group(1)).strip()) if name_match else "?"
-
-        price_match = re.search(r'market_listing_price[^>]*>(.*?)</span>', chunk, re.S)
-        price = html.unescape(re.sub(r"<[^>]+>", "", price_match.group(1)).strip()) if price_match else "?"
 
         orders[order_id] = {"name": name, "qty": qty, "price": price}
 
