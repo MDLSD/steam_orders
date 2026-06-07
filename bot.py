@@ -7,9 +7,10 @@
   - следит за ордерами на покупку и шлёт уведомление, когда ордер сработал;
   - сам определяет, что cookie/сессия Steam протухла, и предупреждает об этом;
   - отвечает на команды в чате:
-        /orders  - показать все активные ордеры
-        /status  - проверить, что бот жив
-        /start   - помощь
+        /orders     - показать все активные ордеры
+        /status     - проверить, что бот жив
+        /setcookie  - обновить cookie steamLoginSecure прямо из Telegram
+        /start      - помощь
 
 Все секреты берутся из переменных окружения / файла .env — в коде ничего нет.
 """
@@ -55,6 +56,8 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "180"))
 MY_LISTINGS_URL = "https://steamcommunity.com/market/mylistings/?count=100"
 # Long-poll для команд: на столько секунд «висит» запрос getUpdates.
 COMMAND_POLL_TIMEOUT = 20
+# Путь к .env рядом со скриптом — для сохранения cookie через /setcookie.
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 
 class SessionExpired(Exception):
@@ -74,6 +77,37 @@ def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID) -> None:
         print(f"[!] Не удалось отправить в Telegram: {e}")
 
 
+def delete_message(chat_id: str, message_id: int) -> None:
+    """Удаляет сообщение (используется, чтобы стереть из чата cookie)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
+    try:
+        requests.post(url, data={"chat_id": chat_id, "message_id": message_id}, timeout=20)
+    except requests.RequestException:
+        pass
+
+
+def save_cookie_to_env(new_value: str) -> None:
+    """Перезаписывает STEAM_LOGIN_SECURE в .env, чтобы значение пережило перезапуск."""
+    lines = []
+    found = False
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("STEAM_LOGIN_SECURE="):
+                    lines.append(f"STEAM_LOGIN_SECURE={new_value}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"STEAM_LOGIN_SECURE={new_value}\n")
+    with open(ENV_PATH, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    try:
+        os.chmod(ENV_PATH, 0o600)
+    except OSError:
+        pass
+
+
 def get_updates(offset):
     """Забирает новые сообщения боту (long-polling)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
@@ -90,10 +124,11 @@ def get_updates(offset):
 
 
 # ----------------------------- Steam ----------------------------
-def fetch_buy_orders() -> dict:
+def fetch_buy_orders(cookie: str = None) -> dict:
     """
     Возвращает {order_id: {"name": ..., "qty": int, "price": str}}.
     Бросает SessionExpired, если Steam нас не узнал (cookie протухла).
+    Если cookie не передана — берётся текущая STEAM_LOGIN_SECURE.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -104,7 +139,7 @@ def fetch_buy_orders() -> dict:
     r = requests.get(
         MY_LISTINGS_URL,
         headers=headers,
-        cookies={"steamLoginSecure": STEAM_LOGIN_SECURE},
+        cookies={"steamLoginSecure": cookie or STEAM_LOGIN_SECURE},
         timeout=30,
     )
     r.raise_for_status()
@@ -174,35 +209,72 @@ def diff_and_notify(old: dict, new: dict) -> None:
 
 
 # ----------------------------- Loop -----------------------------
-def handle_command(text: str, chat_id: str, last_orders: dict, session_ok: bool) -> None:
+def handle_command(msg: dict, state: dict) -> None:
+    global STEAM_LOGIN_SECURE
+    text = msg["text"]
+    chat_id = str(msg["chat"]["id"])
     cmd = text.strip().split()[0].lower().split("@")[0]
+
     if cmd == "/orders":
-        if not session_ok:
-            send_telegram("⚠️ Сессия Steam протухла — список недоступен. Обнови cookie.", chat_id)
+        if not state["session_ok"]:
+            send_telegram("⚠️ Сессия Steam протухла — список недоступен. Обнови cookie: /setcookie", chat_id)
         else:
-            send_telegram(format_orders(last_orders), chat_id)
+            send_telegram(format_orders(state["orders"]), chat_id)
+
     elif cmd == "/status":
-        state = "🟢 сессия Steam активна" if session_ok else "🔴 сессия Steam протухла"
+        line = "🟢 сессия Steam активна" if state["session_ok"] else "🔴 сессия Steam протухла"
         send_telegram(
-            f"🤖 Бот работает.\n{state}\n"
+            f"🤖 Бот работает.\n{line}\n"
             f"⏱ интервал проверки: {CHECK_INTERVAL} сек\n"
-            f"📋 ордеров сейчас: {len(last_orders)}",
+            f"📋 ордеров сейчас: {len(state['orders'])}",
             chat_id,
         )
+
+    elif cmd == "/setcookie":
+        # Сразу удаляем сообщение с cookie из чата — это секрет.
+        delete_message(chat_id, msg["message_id"])
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            send_telegram(
+                "Использование: /setcookie <значение steamLoginSecure>\n"
+                "Сообщение с cookie я удалю автоматически.",
+                chat_id,
+            )
+            return
+        new_cookie = parts[1].strip()
+        send_telegram("⏳ Проверяю новую cookie...", chat_id)
+        try:
+            orders = fetch_buy_orders(new_cookie)
+        except SessionExpired:
+            send_telegram("❌ Эта cookie недействительна — Steam не узнал. Старая cookie оставлена.", chat_id)
+            return
+        except requests.RequestException as e:
+            send_telegram(f"⚠️ Не удалось проверить cookie (ошибка сети): {e}", chat_id)
+            return
+        # Cookie рабочая — применяем и сохраняем.
+        STEAM_LOGIN_SECURE = new_cookie
+        save_cookie_to_env(new_cookie)
+        state["orders"] = orders
+        state["session_ok"] = True
+        send_telegram(
+            f"✅ Cookie обновлена и сохранена в .env.\n📋 Активных ордеров: {len(orders)}",
+            chat_id,
+        )
+
     elif cmd in ("/start", "/help"):
         send_telegram(
             "Привет! Я слежу за твоими ордерами на покупку в Steam.\n\n"
             "Команды:\n"
             "/orders — показать активные ордеры\n"
-            "/status — проверить, что бот жив",
+            "/status — проверить, что бот жив\n"
+            "/setcookie <значение> — обновить cookie steamLoginSecure",
             chat_id,
         )
 
 
 def main() -> None:
     print("Бот запущен.")
-    last_orders: dict = {}
-    session_ok = True
+    state = {"orders": {}, "session_ok": True}
     offset = None
     last_order_check = 0.0
     initialized = False
@@ -213,23 +285,23 @@ def main() -> None:
             last_order_check = time.time()
             try:
                 cur = fetch_buy_orders()
-                if not session_ok:
-                    session_ok = True
+                if not state["session_ok"]:
+                    state["session_ok"] = True
                     send_telegram("✅ Сессия Steam восстановлена. Слежу за ордерами дальше.")
                 if not initialized:
-                    last_orders = cur
+                    state["orders"] = cur
                     initialized = True
                     print(f"Старт: активных ордеров {len(cur)}")
                 else:
-                    diff_and_notify(last_orders, cur)
-                    last_orders = cur
+                    diff_and_notify(state["orders"], cur)
+                    state["orders"] = cur
                     print(f"Проверено. Активных ордеров: {len(cur)}")
             except SessionExpired:
-                if session_ok:
-                    session_ok = False
+                if state["session_ok"]:
+                    state["session_ok"] = False
                     send_telegram(
                         "⚠️ Сессия Steam протухла — cookie steamLoginSecure больше не действует.\n"
-                        "Обнови значение STEAM_LOGIN_SECURE и перезапусти бота."
+                        "Обнови её прямо здесь командой:\n/setcookie <новое значение>"
                     )
                 print("[!] Сессия Steam протухла.")
             except requests.RequestException as e:
@@ -241,11 +313,10 @@ def main() -> None:
             msg = upd.get("message") or upd.get("channel_post")
             if not msg or "text" not in msg:
                 continue
-            chat_id = str(msg["chat"]["id"])
             # отвечаем только в разрешённый чат
-            if chat_id != str(TELEGRAM_CHAT_ID):
+            if str(msg["chat"]["id"]) != str(TELEGRAM_CHAT_ID):
                 continue
-            handle_command(msg["text"], chat_id, last_orders, session_ok)
+            handle_command(msg, state)
 
 
 if __name__ == "__main__":
