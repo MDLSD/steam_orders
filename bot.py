@@ -77,6 +77,21 @@ def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID) -> None:
         print(f"[!] Не удалось отправить в Telegram: {e}")
 
 
+def register_commands() -> None:
+    """Регистрирует команды в меню Telegram (кнопка «/» в чате)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyCommands"
+    commands = [
+        {"command": "orders", "description": "Показать активные ордеры"},
+        {"command": "status", "description": "Статус бота"},
+        {"command": "setcookie", "description": "Обновить cookie steamLoginSecure"},
+        {"command": "help", "description": "Помощь"},
+    ]
+    try:
+        requests.post(url, json={"commands": commands}, timeout=20)
+    except requests.RequestException as e:
+        print(f"[!] setMyCommands: {e}", flush=True)
+
+
 def delete_message(chat_id: str, message_id: int) -> None:
     """Удаляет сообщение (используется, чтобы стереть из чата cookie)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
@@ -214,6 +229,7 @@ def handle_command(msg: dict, state: dict) -> None:
     text = msg["text"]
     chat_id = str(msg["chat"]["id"])
     cmd = text.strip().split()[0].lower().split("@")[0]
+    print(f"[команда] получено: {cmd!r} от чата {chat_id}", flush=True)
 
     if cmd == "/orders":
         if not state["session_ok"]:
@@ -271,9 +287,17 @@ def handle_command(msg: dict, state: dict) -> None:
             chat_id,
         )
 
+    elif cmd.startswith("/"):
+        send_telegram(
+            f"Неизвестная команда: {cmd}\n"
+            "Доступно: /orders /status /setcookie /help",
+            chat_id,
+        )
+
 
 def main() -> None:
-    print("Бот запущен.")
+    print("Бот запущен.", flush=True)
+    register_commands()
     state = {"orders": {}, "session_ok": True}
     offset = None
     last_order_check = 0.0

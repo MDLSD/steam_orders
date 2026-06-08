@@ -5,11 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Замени на своего пользователя и путь на VPS:
+# Замени на своего пользователя и путь на VPS (пути ДОЛЖНЫ быть абсолютными):
 User=YOUR_VPS_USER
 WorkingDirectory=/home/YOUR_VPS_USER/steam_order_bot
 EnvironmentFile=/home/YOUR_VPS_USER/steam_order_bot/.env
 ExecStart=/home/YOUR_VPS_USER/steam_order_bot/venv/bin/python bot.py
+# Чтобы логи (print) шли в journal сразу, а не пачкой:
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=15
 
