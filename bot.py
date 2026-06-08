@@ -66,15 +66,15 @@ class SessionExpired(Exception):
 
 # --------------------------- Telegram ---------------------------
 def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID) -> None:
+    # parse_mode не используем намеренно: спецсимволы (< > &) в названиях
+    # предметов или подсказках иначе ломают отправку с ошибкой 400.
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(
-            url,
-            data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=20,
-        )
+        r = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=20)
+        if not r.ok:
+            print(f"[!] Telegram отклонил сообщение: {r.status_code} {r.text}", flush=True)
     except requests.RequestException as e:
-        print(f"[!] Не удалось отправить в Telegram: {e}")
+        print(f"[!] Не удалось отправить в Telegram: {e}", flush=True)
 
 
 def register_commands() -> None:
@@ -252,7 +252,7 @@ def handle_command(msg: dict, state: dict) -> None:
         parts = text.strip().split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             send_telegram(
-                "Использование: /setcookie <значение steamLoginSecure>\n"
+                "Использование: /setcookie [значение steamLoginSecure]\n"
                 "Сообщение с cookie я удалю автоматически.",
                 chat_id,
             )
@@ -283,7 +283,7 @@ def handle_command(msg: dict, state: dict) -> None:
             "Команды:\n"
             "/orders — показать активные ордеры\n"
             "/status — проверить, что бот жив\n"
-            "/setcookie <значение> — обновить cookie steamLoginSecure",
+            "/setcookie [значение] — обновить cookie steamLoginSecure",
             chat_id,
         )
 
