@@ -157,9 +157,15 @@ def fetch_buy_orders(cookie: str = None) -> dict:
         cookies={"steamLoginSecure": cookie or STEAM_LOGIN_SECURE},
         timeout=30,
     )
+    # Истёкшая/битая cookie: Steam отвечает 400/401/403 (тело обычно "[]").
+    if r.status_code in (400, 401, 403):
+        print(f"[!] mylistings вернул {r.status_code} — cookie протухла.", flush=True)
+        raise SessionExpired()
+
+    # Прочие HTTP-ошибки (5xx и т.п.) — временные, пусть будут сетевой ошибкой.
     r.raise_for_status()
 
-    # Залогиненному отдаётся JSON с success=true. Иначе — cookie протухла.
+    # Залогиненному отдаётся JSON-объект с success=true. Иначе — cookie протухла.
     try:
         data = r.json()
     except ValueError:
