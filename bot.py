@@ -163,8 +163,11 @@ def fetch_buy_orders(cookie: str = None) -> dict:
     try:
         data = r.json()
     except ValueError:
+        print(f"[!] mylistings вернул не JSON (статус {r.status_code}) — cookie протухла.", flush=True)
         raise SessionExpired()
     if not isinstance(data, dict) or not data.get("success"):
+        print(f"[!] mylistings success={data.get('success') if isinstance(data, dict) else '?'} "
+              f"(статус {r.status_code}) — cookie протухла.", flush=True)
         raise SessionExpired()
 
     page = data.get("results_html", "")
@@ -325,7 +328,7 @@ def main() -> None:
                     state["session_ok"] = False
                     send_telegram(
                         "⚠️ Сессия Steam протухла — cookie steamLoginSecure больше не действует.\n"
-                        "Обнови её прямо здесь командой:\n/setcookie <новое значение>"
+                        "Обнови её прямо здесь командой:\n/setcookie [новое значение]"
                     )
                 print("[!] Сессия Steam протухла.")
             except requests.RequestException as e:
